@@ -129,6 +129,13 @@ static ssize_t timer_counter_show(struct device *dev, struct device_attribute *a
 
 static DEVICE_ATTR(timer_counter, S_IRUGO, timer_counter_show, NULL);
 
+static ssize_t frequency_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%u\n", pdata->frequency);
+}
+
+static DEVICE_ATTR(frequency, S_IRUGO, frequency_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -138,6 +145,7 @@ static struct attribute *attrs[] = {
    &dev_attr_interrupt_delta.attr,
    &dev_attr_stats.attr,
    &dev_attr_timer_name.attr,
+   &dev_attr_frequency.attr,
    NULL,
 };
 
