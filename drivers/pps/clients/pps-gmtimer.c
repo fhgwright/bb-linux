@@ -57,6 +57,8 @@ struct pps_gmtimer_platform_data {
   unsigned int capture;
   unsigned int overflow;
   unsigned int count_at_interrupt;
+  unsigned int capture_at_interrupt;
+  unsigned int capture_diff;
   struct pps_event_time ts;
   struct timespec delta;
   struct pps_device *pps;
@@ -103,9 +105,7 @@ static DEVICE_ATTR(count_at_interrupt, S_IRUGO, count_at_interrupt_show, NULL);
 
 static ssize_t capture_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%u\n",
-      __omap_dm_timer_read(pdata->capture_timer, OMAP_TIMER_CAPTURE_REG, pdata->capture_timer->posted)
-      );
+  return sprintf(buf, "%u\n", pdata->capture_at_interrupt);
 }
 
 static DEVICE_ATTR(capture, S_IRUGO, capture_show, NULL);
@@ -136,6 +136,13 @@ static ssize_t frequency_show(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(frequency, S_IRUGO, frequency_show, NULL);
 
+static ssize_t capture_diff_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%u\n", pdata->capture_diff);
+}
+
+static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -146,6 +153,7 @@ static struct attribute *attrs[] = {
    &dev_attr_stats.attr,
    &dev_attr_timer_name.attr,
    &dev_attr_frequency.attr,
+   &dev_attr_capture_diff.attr,
    NULL,
 };
 
@@ -170,6 +178,9 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
       pps_get_ts(&pdata->ts);
       pdata->count_at_interrupt = omap_dm_timer_read_counter(pdata->capture_timer);
       count_at_capture = __omap_dm_timer_read(pdata->capture_timer, OMAP_TIMER_CAPTURE_REG, pdata->capture_timer->posted);
+
+      pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
+      pdata->capture_at_interrupt = count_at_capture;
 
       pdata->delta.tv_sec = 0;
 
@@ -269,6 +280,9 @@ static int pps_gmtimer_init_timer(struct device_node *timer_dn, struct pps_gmtim
 
   gt_fclk = omap_dm_timer_get_fclk(pdata->capture_timer);
   pdata->frequency = clk_get_rate(gt_fclk);
+
+  pdata->capture_at_interrupt = 0;
+  pdata->capture_diff = 0;
 
   pr_info("timer name=%s rate=%uHz\n", pdata->timer_name, pdata->frequency);
 
