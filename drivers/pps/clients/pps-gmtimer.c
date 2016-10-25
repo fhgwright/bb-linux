@@ -59,6 +59,7 @@ struct pps_gmtimer_platform_data {
   unsigned int count_at_interrupt;
   unsigned int capture_at_interrupt;
   unsigned int capture_diff;
+  unsigned int ts_spread;
   struct pps_event_time ts;
   struct timespec delta;
   struct pps_device *pps;
@@ -143,6 +144,13 @@ static ssize_t capture_diff_show(struct device *dev, struct device_attribute *at
 
 static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
 
+static ssize_t ts_spread_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%u\n", pdata->ts_spread);
+}
+
+static DEVICE_ATTR(ts_spread, S_IRUGO, ts_spread_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -154,6 +162,7 @@ static struct attribute *attrs[] = {
    &dev_attr_timer_name.attr,
    &dev_attr_frequency.attr,
    &dev_attr_capture_diff.attr,
+   &dev_attr_ts_spread.attr,
    NULL,
 };
 
@@ -173,10 +182,13 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
     irq_status = omap_dm_timer_read_status(pdata->capture_timer);
     if(irq_status & OMAP_TIMER_INT_CAPTURE) {
       uint32_t ps_per_hz;
-      unsigned int count_at_capture;
+      unsigned int count_at_capture, before, after;
 
+      before = omap_dm_timer_read_counter(pdata->capture_timer);
       pps_get_ts(&pdata->ts);
-      pdata->count_at_interrupt = omap_dm_timer_read_counter(pdata->capture_timer);
+      after = omap_dm_timer_read_counter(pdata->capture_timer);
+      pdata->count_at_interrupt = before + ((after - before) >> 1);
+      pdata->ts_spread = after - before;
       count_at_capture = __omap_dm_timer_read(pdata->capture_timer, OMAP_TIMER_CAPTURE_REG, pdata->capture_timer->posted);
 
       pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
@@ -283,6 +295,7 @@ static int pps_gmtimer_init_timer(struct device_node *timer_dn, struct pps_gmtim
 
   pdata->capture_at_interrupt = 0;
   pdata->capture_diff = 0;
+  pdata->ts_spread = 0;
 
   pr_info("timer name=%s rate=%uHz\n", pdata->timer_name, pdata->frequency);
 
