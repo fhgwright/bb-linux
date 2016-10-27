@@ -61,6 +61,7 @@ struct pps_gmtimer_platform_data {
   unsigned int capture_diff;
   unsigned int ts_spread;
   struct pps_event_time ts;
+  struct pps_event_time ts_last, ts_prev;
   struct timespec delta;
   struct pps_device *pps;
   struct pps_source_info info;
@@ -151,6 +152,29 @@ static ssize_t ts_spread_show(struct device *dev, struct device_attribute *attr,
 
 static DEVICE_ATTR(ts_spread, S_IRUGO, ts_spread_show, NULL);
 
+static int print_pps(struct pps_event_time *ts, char *buf)
+{
+#ifdef CONFIG_NTP_PPS
+  return sprintf(buf, "%lld.%09ld, %lld.%09ld\n", (long long) ts->ts_real.tv_sec, ts->ts_real.tv_nsec, (long long) ts->ts_raw.tv_sec, ts->ts_raw.tv_nsec);
+#else /* CONFIG_NTP_PPS */
+  return sprintf(buf, "%lld.%09ld\n", (long long) ts->ts_real.tv_sec, ts->ts_real.tv_nsec);
+#endif /* CONFIG_NTP_PPS */
+}
+
+static ssize_t interrupt_ts_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return print_pps(&pdata->ts_last, buf);
+}
+
+static DEVICE_ATTR(interrupt_ts, S_IRUGO, interrupt_ts_show, NULL);
+
+static ssize_t interrupt_prev_ts_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return print_pps(&pdata->ts_prev, buf);
+}
+
+static DEVICE_ATTR(interrupt_prev_ts, S_IRUGO, interrupt_prev_ts_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -163,6 +187,8 @@ static struct attribute *attrs[] = {
    &dev_attr_frequency.attr,
    &dev_attr_capture_diff.attr,
    &dev_attr_ts_spread.attr,
+   &dev_attr_interrupt_ts.attr,
+   &dev_attr_interrupt_prev_ts.attr,
    NULL,
 };
 
@@ -187,6 +213,8 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
       before = omap_dm_timer_read_counter(pdata->capture_timer);
       pps_get_ts(&pdata->ts);
       after = omap_dm_timer_read_counter(pdata->capture_timer);
+      pdata->ts_prev = pdata->ts_last;
+      pdata->ts_last = pdata->ts;
       pdata->count_at_interrupt = before + ((after - before) >> 1);
       pdata->ts_spread = after - before;
       count_at_capture = __omap_dm_timer_read(pdata->capture_timer, OMAP_TIMER_CAPTURE_REG, pdata->capture_timer->posted);
