@@ -66,6 +66,7 @@ struct pps_gmtimer_platform_data {
   struct pps_device *pps;
   struct pps_source_info info;
   int ready;
+  int is_clocksource;  //FIXME: Consolidate with ready into flags cell
   struct clocksource clksrc;
 };
 
@@ -324,6 +325,7 @@ static int pps_gmtimer_init_timer(struct device_node *timer_dn, struct pps_gmtim
   pdata->capture_at_interrupt = 0;
   pdata->capture_diff = 0;
   pdata->ts_spread = 0;
+  pdata->is_clocksource = 0;
 
   pr_info("timer name=%s rate=%uHz\n", pdata->timer_name, pdata->frequency);
 
@@ -343,35 +345,32 @@ static void pps_gmtimer_cleanup_timer(struct pps_gmtimer_platform_data *pdata) {
 }
 
 /* clocksource ***************/
-static struct pps_gmtimer_platform_data *clocksource_timer = NULL;
 
 static cycle_t pps_gmtimer_read_cycles(struct clocksource *cs) {
-  return (cycle_t)__omap_dm_timer_read_counter(clocksource_timer->capture_timer, clocksource_timer->capture_timer->posted);
+  struct pps_gmtimer_platform_data *pdata = container_of(cs, struct pps_gmtimer_platform_data, clksrc);
+  return (cycle_t) omap_dm_timer_read_counter(pdata->capture_timer);
 }
 
 static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata) {
-  if(!clocksource_timer) {
-    pdata->clksrc.name = pdata->timer_name;
+  pdata->clksrc.name = pdata->timer_name;
 
-    pdata->clksrc.rating = 299;
-    pdata->clksrc.read = pps_gmtimer_read_cycles;
-    pdata->clksrc.mask = CLOCKSOURCE_MASK(32);
-    pdata->clksrc.flags = CLOCK_SOURCE_IS_CONTINUOUS;
+  pdata->clksrc.rating = 299;
+  pdata->clksrc.read = pps_gmtimer_read_cycles;
+  pdata->clksrc.mask = CLOCKSOURCE_MASK(32);
+  pdata->clksrc.flags = CLOCK_SOURCE_IS_CONTINUOUS;
 
-    clocksource_timer = pdata;
-    if (clocksource_register_hz(&pdata->clksrc, pdata->frequency)) {
-      pr_err("Could not register clocksource %s\n", pdata->clksrc.name);
-      clocksource_timer = NULL;
-    } else {
-      pr_info("clocksource: %s at %u Hz\n", pdata->clksrc.name, pdata->frequency);
-    }
+  if (clocksource_register_hz(&pdata->clksrc, pdata->frequency)) {
+    pr_err("Could not register clocksource %s\n", pdata->clksrc.name);
+  } else {
+    pr_info("clocksource: %s at %u Hz\n", pdata->clksrc.name, pdata->frequency);
+    pdata->is_clocksource = 1;
   }
 }
 
 static void pps_gmtimer_clocksource_cleanup(struct pps_gmtimer_platform_data *pdata) {
-  if(pdata == clocksource_timer) {
+  if(pdata->is_clocksource) {
     clocksource_unregister(&pdata->clksrc);
-    clocksource_timer = NULL;
+    pdata->is_clocksource = 0;
   }
 }
 
