@@ -60,6 +60,7 @@ struct pps_gmtimer_platform_data {
   unsigned int capture_at_interrupt;
   unsigned int capture_diff;
   unsigned int ts_spread;
+  unsigned int interrupt_delay;
   struct pps_event_time ts;
   struct pps_event_time ts_last, ts_prev;
   struct timespec delta;
@@ -176,6 +177,13 @@ static ssize_t interrupt_prev_ts_show(struct device *dev, struct device_attribut
 
 static DEVICE_ATTR(interrupt_prev_ts, S_IRUGO, interrupt_prev_ts_show, NULL);
 
+static ssize_t interrupt_delay_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%u\n", pdata->interrupt_delay);
+}
+
+static DEVICE_ATTR(interrupt_delay, S_IRUGO, interrupt_delay_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -190,6 +198,7 @@ static struct attribute *attrs[] = {
    &dev_attr_ts_spread.attr,
    &dev_attr_interrupt_ts.attr,
    &dev_attr_interrupt_prev_ts.attr,
+   &dev_attr_interrupt_delay.attr,
    NULL,
 };
 
@@ -209,19 +218,38 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
     irq_status = omap_dm_timer_read_status(pdata->capture_timer);
     if(irq_status & OMAP_TIMER_INT_CAPTURE) {
       uint32_t ps_per_hz;
-      unsigned int count_at_capture, before, after;
+      unsigned int count_at_capture, first, before, after, spread;
 
+      /*
+       * The first read is just for cache warmup, but we might as well
+       * use it for the latency measurement.
+       */
+      first = omap_dm_timer_read_counter(pdata->capture_timer);
+      /* Do a throwaway pps_get_ts for cache warmup */
+      pps_get_ts(&pdata->ts);
+
+      /*
+       * Now do a "sandwich read" of the counter and the system time,
+       * with a warm cache to make it as tight as possible.
+       */
       before = omap_dm_timer_read_counter(pdata->capture_timer);
       pps_get_ts(&pdata->ts);
       after = omap_dm_timer_read_counter(pdata->capture_timer);
+
       pdata->ts_prev = pdata->ts_last;
       pdata->ts_last = pdata->ts;
-      pdata->count_at_interrupt = before + ((after - before) >> 1);
-      pdata->ts_spread = after - before;
-      count_at_capture = __omap_dm_timer_read(pdata->capture_timer, OMAP_TIMER_CAPTURE_REG, pdata->capture_timer->posted);
 
+      spread = after - before;
+      pdata->ts_spread = spread;
+      pdata->count_at_interrupt = before + (spread >> 1);
+
+      count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
+                                              OMAP_TIMER_CAPTURE_REG,
+                                              pdata->capture_timer->posted);
       pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
       pdata->capture_at_interrupt = count_at_capture;
+
+      pdata->interrupt_delay = first - count_at_capture;
 
       pdata->delta.tv_sec = 0;
 
