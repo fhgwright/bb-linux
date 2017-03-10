@@ -50,6 +50,10 @@ MODULE_AUTHOR("Dan Drown");
 MODULE_DESCRIPTION("PPS Client Driver using OMAP Timer hardware");
 MODULE_VERSION("0.1.0");
 
+/* Sanity checks */
+#define MINIMUM_DT_FREQUENCY 10000000
+#define MAXIMUM_DT_FREQUENCY 24000000
+
 struct pps_gmtimer_platform_data {
   struct omap_dm_timer *capture_timer;
   const char *timer_name;
@@ -61,6 +65,7 @@ struct pps_gmtimer_platform_data {
   unsigned int capture_diff;
   unsigned int ts_spread;
   unsigned int interrupt_delay;
+  unsigned int dt_frequency;
   struct pps_event_time ts;
   struct pps_event_time ts_last, ts_prev;
   struct timespec delta;
@@ -184,6 +189,13 @@ static ssize_t interrupt_delay_show(struct device *dev, struct device_attribute 
 
 static DEVICE_ATTR(interrupt_delay, S_IRUGO, interrupt_delay_show, NULL);
 
+static ssize_t devtree_frequency_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%u\n", pdata->dt_frequency);
+}
+
+static DEVICE_ATTR(devtree_frequency, S_IRUGO, devtree_frequency_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -199,6 +211,7 @@ static struct attribute *attrs[] = {
    &dev_attr_interrupt_ts.attr,
    &dev_attr_interrupt_prev_ts.attr,
    &dev_attr_interrupt_delay.attr,
+   &dev_attr_devtree_frequency.attr,
    NULL,
 };
 
@@ -306,13 +319,22 @@ static void omap_dm_timer_setup_capture(struct omap_dm_timer *timer) {
 /* if tclkin has no clock, writes to the timer registers will stall and you will get a message like:
  * Unhandled fault: external abort on non-linefetch (0x1028) at 0xfa044048
  */
-static void omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
+static int omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
   struct clk *gt_fclk;
+  unsigned int frequency;
+  int badfreq = 0;
 
   omap_dm_timer_set_source(pdata->capture_timer, OMAP_TIMER_SRC_EXT_CLK);
-  gt_fclk = omap_dm_timer_get_fclk(pdata->capture_timer);
-  pdata->frequency = clk_get_rate(gt_fclk);
-  pr_info("timer(%s) switched to tclkin, rate=%uHz\n", pdata->timer_name, pdata->frequency);
+  frequency = pdata->dt_frequency;
+  if (frequency < MINIMUM_DT_FREQUENCY || frequency > MAXIMUM_DT_FREQUENCY) {
+    gt_fclk = omap_dm_timer_get_fclk(pdata->capture_timer);
+    frequency = clk_get_rate(gt_fclk);
+    badfreq = 1;
+  }
+  pdata->frequency = frequency;
+  pr_info("timer(%s) switched to tclkin, %s rate=%uHz\n",
+          pdata->timer_name, badfreq ? "assumed" : "device-tree", frequency);
+  return badfreq;
 }
 
 static void pps_gmtimer_enable_irq(struct pps_gmtimer_platform_data *pdata) {
@@ -451,7 +473,8 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   const struct of_device_id *match;
   struct pps_gmtimer_platform_data *pdata;
   struct pinctrl *pinctrl;
-  const __be32 *use_tclkin;
+  const __be32 *use_tclkin, *of_freq;
+  int badfreq = 0;
 
   match = of_match_device(pps_gmtimer_dt_ids, &pdev->dev);
   if (match) {
@@ -473,9 +496,16 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   if (IS_ERR(pinctrl))
     pr_warning("pins are not configured from the driver\n");
 
+  of_freq = of_get_property(pdev->dev.of_node, "frequency", NULL);
+  if (of_freq) {
+    pdata->dt_frequency = be32_to_cpup(of_freq);
+  } else {
+    pdata->dt_frequency  = 0;
+  }
+
   use_tclkin = of_get_property(pdev->dev.of_node, "use-tclkin", NULL);
   if(use_tclkin && be32_to_cpup(use_tclkin) == 1) {
-    omap_dm_timer_use_tclkin(pdata);
+    badfreq = omap_dm_timer_use_tclkin(pdata);
   } else {
     pr_info("using system clock\n");
   }
@@ -490,7 +520,11 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   } else {
     // ready to go
     pdata->ready = 1;
-    pps_gmtimer_clocksource_init(pdata);
+
+    /* Only make this a clocksource if we know the frequency. */
+    if (!badfreq) {
+      pps_gmtimer_clocksource_init(pdata);
+    }
 
     pps_gmtimer_enable_irq(pdata);
   }
