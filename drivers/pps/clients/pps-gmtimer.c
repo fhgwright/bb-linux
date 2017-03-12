@@ -76,6 +76,19 @@ struct pps_gmtimer_platform_data {
   struct clocksource clksrc;
 };
 
+/* helpers *******************/
+
+/*
+ * Read timer counter inline, ignoring "posting" (as clocksource does).
+ * Since the "posted" check, when used, only checks for a posted write
+ * to the same register, and since we never write the counter, the check
+ * would just be a pointless (and time-wasting) extra register read.
+ */
+static inline unsigned int read_timer_counter(struct omap_dm_timer *timer)
+{
+  return __omap_dm_timer_read_counter(timer, 0);
+}
+
 /* kobject *******************/
 static ssize_t timer_name_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
@@ -132,7 +145,7 @@ static ssize_t timer_counter_show(struct device *dev, struct device_attribute *a
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   unsigned int current_count = 0;
 
-  current_count = omap_dm_timer_read_counter(pdata->capture_timer);
+  current_count = read_timer_counter(pdata->capture_timer);
   return sprintf(buf, "%u\n", current_count);
 }
 
@@ -237,7 +250,7 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
        * The first read is just for cache warmup, but we might as well
        * use it for the latency measurement.
        */
-      first = omap_dm_timer_read_counter(pdata->capture_timer);
+      first = read_timer_counter(pdata->capture_timer);
       /* Do a throwaway pps_get_ts for cache warmup */
       pps_get_ts(&pdata->ts);
 
@@ -245,9 +258,9 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
        * Now do a "sandwich read" of the counter and the system time,
        * with a warm cache to make it as tight as possible.
        */
-      before = omap_dm_timer_read_counter(pdata->capture_timer);
+      before = read_timer_counter(pdata->capture_timer);
       pps_get_ts(&pdata->ts);
-      after = omap_dm_timer_read_counter(pdata->capture_timer);
+      after = read_timer_counter(pdata->capture_timer);
 
       pdata->ts_prev = pdata->ts_last;
       pdata->ts_last = pdata->ts;
@@ -257,8 +270,7 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
       pdata->count_at_interrupt = before + (spread >> 1);
 
       count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
-                                              OMAP_TIMER_CAPTURE_REG,
-                                              pdata->capture_timer->posted);
+                                              OMAP_TIMER_CAPTURE_REG, 0);
       pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
       pdata->capture_at_interrupt = count_at_capture;
 
@@ -398,7 +410,7 @@ static void pps_gmtimer_cleanup_timer(struct pps_gmtimer_platform_data *pdata) {
 
 static cycle_t pps_gmtimer_read_cycles(struct clocksource *cs) {
   struct pps_gmtimer_platform_data *pdata = container_of(cs, struct pps_gmtimer_platform_data, clksrc);
-  return (cycle_t) omap_dm_timer_read_counter(pdata->capture_timer);
+  return (cycle_t) read_timer_counter(pdata->capture_timer);
 }
 
 static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata) {
