@@ -265,9 +265,16 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
       pdata->ts_prev = pdata->ts_last;
       pdata->ts_last = pdata->ts;
 
+      /*
+       * If C is the captured value, B is before, and A is after, then:
+       * Min offset = B - (C + 1)
+       * Max offset = (A + 1) - C
+       * Total variation = max - min = A - B + 2
+       * Mean offset = (min + max) / 2 = (A + B) / 2 - C
+       */
       spread = after - before;
-      pdata->ts_spread = spread;
-      pdata->count_at_interrupt = before + (spread >> 1);
+      pdata->ts_spread = spread + 2;
+      pdata->count_at_interrupt = before + ((spread + 1) >> 1);
 
       count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
                                               OMAP_TIMER_CAPTURE_REG, 0);
