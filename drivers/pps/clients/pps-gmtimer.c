@@ -42,6 +42,7 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/pps_kernel.h>
 #include <linux/clocksource.h>
+#include <linux/time.h>
 
 #include <plat/dmtimer.h>
 
@@ -243,8 +244,7 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
 
     irq_status = omap_dm_timer_read_status(pdata->capture_timer);
     if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-      uint32_t ps_per_hz;
-      unsigned int count_at_capture, first, before, after, spread;
+      unsigned int count_at_capture, first, before, after, spread, delta;
 
       /*
        * The first read is just for cache warmup, but we might as well
@@ -276,11 +276,12 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
 
       pdata->interrupt_delay = first - count_at_capture;
 
-      pdata->delta.tv_sec = 0;
+      delta = pdata->count_at_interrupt - count_at_capture;
 
-      // use picoseconds per hz to avoid floating point and limit the rounding error
-      ps_per_hz = 1000000000 / (pdata->frequency / 1000);
-      pdata->delta.tv_nsec = ((pdata->count_at_interrupt - count_at_capture) * ps_per_hz) / 1000;
+      pdata->delta.tv_sec = 0;
+      pdata->delta.tv_nsec = clocksource_cyc2ns(delta,
+                                                pdata->clksrc.mult,
+                                                pdata->clksrc.shift);
 
       pps_sub_ts(&pdata->ts, pdata->delta);
       pps_event(pdata->pps, &pdata->ts, PPS_CAPTUREASSERT, NULL);
@@ -413,7 +414,7 @@ static cycle_t pps_gmtimer_read_cycles(struct clocksource *cs) {
   return (cycle_t) read_timer_counter(pdata->capture_timer);
 }
 
-static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata) {
+static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata, int badfreq) {
   pdata->clksrc.name = pdata->timer_name;
 
   pdata->clksrc.rating = 299;
@@ -421,6 +422,12 @@ static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata
   pdata->clksrc.mask = CLOCKSOURCE_MASK(32);
   pdata->clksrc.flags = CLOCK_SOURCE_IS_CONTINUOUS;
 
+  if (badfreq) {
+    // Don't register it as a clocksource, but set up conversion factors.
+    clocks_calc_mult_shift(&pdata->clksrc.mult, &pdata->clksrc.shift,
+                           pdata->frequency, NSEC_PER_SEC, 1);
+    return;
+  }
   if (clocksource_register_hz(&pdata->clksrc, pdata->frequency)) {
     pr_err("Could not register clocksource %s\n", pdata->clksrc.name);
   } else {
@@ -533,10 +540,7 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
     // ready to go
     pdata->ready = 1;
 
-    /* Only make this a clocksource if we know the frequency. */
-    if (!badfreq) {
-      pps_gmtimer_clocksource_init(pdata);
-    }
+    pps_gmtimer_clocksource_init(pdata, badfreq);
 
     pps_gmtimer_enable_irq(pdata);
   }
