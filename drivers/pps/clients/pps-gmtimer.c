@@ -64,7 +64,7 @@ struct pps_gmtimer_platform_data {
   unsigned int count_at_interrupt;
   unsigned int capture_at_interrupt;
   unsigned int capture_diff;
-  unsigned int ts_spread;
+  unsigned int capture_spread;
   unsigned int interrupt_delay;
   unsigned int dt_frequency;
   struct pps_event_time ts;
@@ -166,12 +166,15 @@ static ssize_t capture_diff_show(struct device *dev, struct device_attribute *at
 
 static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
 
-static ssize_t ts_spread_show(struct device *dev, struct device_attribute *attr, char *buf) {
+static ssize_t capture_uncertainty_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%u\n", pdata->ts_spread);
+  struct clocksource *clk = &pdata->clksrc;
+  uint32_t nanos = clocksource_cyc2ns(pdata->capture_spread,
+                                      clk->mult, clk->shift);
+  return sprintf(buf, "0.%.09u\n", nanos);
 }
 
-static DEVICE_ATTR(ts_spread, S_IRUGO, ts_spread_show, NULL);
+static DEVICE_ATTR(capture_uncertainty, S_IRUGO, capture_uncertainty_show, NULL);
 
 static int print_pps(struct pps_event_time *ts, char *buf)
 {
@@ -221,7 +224,7 @@ static struct attribute *attrs[] = {
    &dev_attr_timer_name.attr,
    &dev_attr_frequency.attr,
    &dev_attr_capture_diff.attr,
-   &dev_attr_ts_spread.attr,
+   &dev_attr_capture_uncertainty.attr,
    &dev_attr_interrupt_ts.attr,
    &dev_attr_interrupt_prev_ts.attr,
    &dev_attr_interrupt_delay.attr,
@@ -273,7 +276,7 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
        * Mean offset = (min + max) / 2 = (A + B) / 2 - C
        */
       spread = after - before;
-      pdata->ts_spread = spread + 2;
+      pdata->capture_spread = spread + 2;
       pdata->count_at_interrupt = before + ((spread + 1) >> 1);
 
       count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
@@ -394,7 +397,7 @@ static int pps_gmtimer_init_timer(struct device_node *timer_dn, struct pps_gmtim
 
   pdata->capture_at_interrupt = 0;
   pdata->capture_diff = 0;
-  pdata->ts_spread = 0;
+  pdata->capture_spread = 0;
   pdata->is_clocksource = 0;
 
   pr_info("timer name=%s rate=%uHz\n", pdata->timer_name, pdata->frequency);
