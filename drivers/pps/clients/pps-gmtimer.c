@@ -246,7 +246,8 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
   uint32_t irq_status = omap_dm_timer_read_status(timer);
 
   if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-    uint32_t count_at_capture, first, before, after, spread, delta;
+    uint32_t count_at_capture, first, before, middle, after, spread, delta;
+    struct pps_event_time ts1, ts2, *tsp;
 
     /*
      * The first read is just for cache warmup, but we might as well
@@ -254,18 +255,27 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
      */
     first = read_timer_counter(timer);
     /* Do a throwaway pps_get_ts for cache warmup */
-    pps_get_ts(&pdata->ts);
+    pps_get_ts(&ts1);
 
     /*
-     * Now do a "sandwich read" of the counter and the system time,
+     * Now do a double "sandwich read" of the counter and the system time,
      * with a warm cache to make it as tight as possible.
+     * Doubling it allows us to defend against occasional distractions.
      */
     before = read_timer_counter(timer);
-    pps_get_ts(&pdata->ts);
+    pps_get_ts(&ts1);
+    middle = read_timer_counter(timer);
+    pps_get_ts(&ts2);
     after = read_timer_counter(timer);
 
-    pdata->ts_prev = pdata->ts_last;
-    pdata->ts_last = pdata->ts;
+    /* Use whichever read was faster, preferring the earlier one */
+    if (middle - before <= after - middle) {
+      after = middle;
+      tsp = &ts1;
+    } else {
+      before = middle;
+      tsp = &ts2;
+    }
 
     /*
      * If C is the captured value, B is before, and A is after, then:
@@ -292,7 +302,12 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
                                               pdata->clksrc.mult,
                                               pdata->clksrc.shift);
 
-    pps_sub_ts(&pdata->ts, pdata->delta);
+    pdata->ts_prev = pdata->ts_last;
+    pdata->ts_last = *tsp;
+
+    pps_sub_ts(tsp, pdata->delta);
+    pdata->ts = *tsp;
+
     pps_event(pdata->pps, &pdata->ts, PPS_CAPTUREASSERT, NULL);
 
     pdata->capture++;
