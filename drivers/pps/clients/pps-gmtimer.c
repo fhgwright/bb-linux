@@ -241,21 +241,18 @@ static struct attribute_group attr_group = {
 
 /* timers ********************/
 static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
-  struct pps_gmtimer_platform_data *pdata;
+  struct pps_gmtimer_platform_data *pdata = data;
+  struct omap_dm_timer *timer = pdata->capture_timer;
+  uint32_t irq_status = omap_dm_timer_read_status(timer);
 
-  pdata = data;
-
-  unsigned int irq_status;
-
-  irq_status = omap_dm_timer_read_status(pdata->capture_timer);
   if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-    unsigned int count_at_capture, first, before, after, spread, delta;
+    uint32_t count_at_capture, first, before, after, spread, delta;
 
     /*
      * The first read is just for cache warmup, but we might as well
      * use it for the latency measurement.
      */
-    first = read_timer_counter(pdata->capture_timer);
+    first = read_timer_counter(timer);
     /* Do a throwaway pps_get_ts for cache warmup */
     pps_get_ts(&pdata->ts);
 
@@ -263,9 +260,9 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
      * Now do a "sandwich read" of the counter and the system time,
      * with a warm cache to make it as tight as possible.
      */
-    before = read_timer_counter(pdata->capture_timer);
+    before = read_timer_counter(timer);
     pps_get_ts(&pdata->ts);
-    after = read_timer_counter(pdata->capture_timer);
+    after = read_timer_counter(timer);
 
     pdata->ts_prev = pdata->ts_last;
     pdata->ts_last = pdata->ts;
@@ -281,7 +278,7 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
     pdata->capture_spread = spread + 2;
     pdata->count_at_interrupt = before + ((spread + 1) >> 1);
 
-    count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
+    count_at_capture = __omap_dm_timer_read(timer,
                                             OMAP_TIMER_CAPTURE_REG, 0);
     pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
     pdata->capture_at_interrupt = count_at_capture;
@@ -300,11 +297,11 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
 
     pdata->capture++;
 
-    __omap_dm_timer_write_status(pdata->capture_timer, OMAP_TIMER_INT_CAPTURE);
+    __omap_dm_timer_write_status(timer, OMAP_TIMER_INT_CAPTURE);
   }
   if(irq_status & OMAP_TIMER_INT_OVERFLOW) {
     pdata->overflow++;
-    __omap_dm_timer_write_status(pdata->capture_timer, OMAP_TIMER_INT_OVERFLOW);
+    __omap_dm_timer_write_status(timer, OMAP_TIMER_INT_OVERFLOW);
   }
 
   return IRQ_HANDLED; // TODO: shared interrupts?
