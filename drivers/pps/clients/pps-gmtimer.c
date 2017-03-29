@@ -56,8 +56,8 @@ MODULE_VERSION("0.1.0");
 #define MAXIMUM_DT_FREQUENCY 24000000
 
 struct pps_gmtimer_platform_data {
+  struct clocksource clksrc;  // First since it may be used frequently
   struct omap_dm_timer *capture_timer;
-  const char *timer_name;
   uint32_t frequency;
   unsigned int capture;
   unsigned int overflow;
@@ -67,13 +67,13 @@ struct pps_gmtimer_platform_data {
   unsigned int capture_spread;
   unsigned int interrupt_delay;
   unsigned int dt_frequency;
+  const char *timer_name;
   struct pps_event_time ts;
   struct pps_event_time ts_last, ts_prev;
   struct timespec delta;
   struct pps_device *pps;
   struct pps_source_info info;
   int is_clocksource;  //FIXME: Create flags cell
-  struct clocksource clksrc;
 };
 
 /* helpers *******************/
