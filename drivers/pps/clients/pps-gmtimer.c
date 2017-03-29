@@ -72,8 +72,7 @@ struct pps_gmtimer_platform_data {
   struct timespec delta;
   struct pps_device *pps;
   struct pps_source_info info;
-  int ready;
-  int is_clocksource;  //FIXME: Consolidate with ready into flags cell
+  int is_clocksource;  //FIXME: Create flags cell
   struct clocksource clksrc;
 };
 
@@ -242,68 +241,66 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
 
   pdata = data;
 
-  if(pdata->ready) {
-    unsigned int irq_status;
+  unsigned int irq_status;
 
-    irq_status = omap_dm_timer_read_status(pdata->capture_timer);
-    if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-      unsigned int count_at_capture, first, before, after, spread, delta;
+  irq_status = omap_dm_timer_read_status(pdata->capture_timer);
+  if(irq_status & OMAP_TIMER_INT_CAPTURE) {
+    unsigned int count_at_capture, first, before, after, spread, delta;
 
-      /*
-       * The first read is just for cache warmup, but we might as well
-       * use it for the latency measurement.
-       */
-      first = read_timer_counter(pdata->capture_timer);
-      /* Do a throwaway pps_get_ts for cache warmup */
-      pps_get_ts(&pdata->ts);
+    /*
+     * The first read is just for cache warmup, but we might as well
+     * use it for the latency measurement.
+     */
+    first = read_timer_counter(pdata->capture_timer);
+    /* Do a throwaway pps_get_ts for cache warmup */
+    pps_get_ts(&pdata->ts);
 
-      /*
-       * Now do a "sandwich read" of the counter and the system time,
-       * with a warm cache to make it as tight as possible.
-       */
-      before = read_timer_counter(pdata->capture_timer);
-      pps_get_ts(&pdata->ts);
-      after = read_timer_counter(pdata->capture_timer);
+    /*
+     * Now do a "sandwich read" of the counter and the system time,
+     * with a warm cache to make it as tight as possible.
+     */
+    before = read_timer_counter(pdata->capture_timer);
+    pps_get_ts(&pdata->ts);
+    after = read_timer_counter(pdata->capture_timer);
 
-      pdata->ts_prev = pdata->ts_last;
-      pdata->ts_last = pdata->ts;
+    pdata->ts_prev = pdata->ts_last;
+    pdata->ts_last = pdata->ts;
 
-      /*
-       * If C is the captured value, B is before, and A is after, then:
-       * Min offset = B - (C + 1)
-       * Max offset = (A + 1) - C
-       * Total variation = max - min = A - B + 2
-       * Mean offset = (min + max) / 2 = (A + B) / 2 - C
-       */
-      spread = after - before;
-      pdata->capture_spread = spread + 2;
-      pdata->count_at_interrupt = before + ((spread + 1) >> 1);
+    /*
+     * If C is the captured value, B is before, and A is after, then:
+     * Min offset = B - (C + 1)
+     * Max offset = (A + 1) - C
+     * Total variation = max - min = A - B + 2
+     * Mean offset = (min + max) / 2 = (A + B) / 2 - C
+     */
+    spread = after - before;
+    pdata->capture_spread = spread + 2;
+    pdata->count_at_interrupt = before + ((spread + 1) >> 1);
 
-      count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
-                                              OMAP_TIMER_CAPTURE_REG, 0);
-      pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
-      pdata->capture_at_interrupt = count_at_capture;
+    count_at_capture = __omap_dm_timer_read(pdata->capture_timer,
+                                            OMAP_TIMER_CAPTURE_REG, 0);
+    pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
+    pdata->capture_at_interrupt = count_at_capture;
 
-      pdata->interrupt_delay = first - count_at_capture;
+    pdata->interrupt_delay = first - count_at_capture;
 
-      delta = pdata->count_at_interrupt - count_at_capture;
+    delta = pdata->count_at_interrupt - count_at_capture;
 
-      pdata->delta.tv_sec = 0;
-      pdata->delta.tv_nsec = clocksource_cyc2ns(delta,
-                                                pdata->clksrc.mult,
-                                                pdata->clksrc.shift);
+    pdata->delta.tv_sec = 0;
+    pdata->delta.tv_nsec = clocksource_cyc2ns(delta,
+                                              pdata->clksrc.mult,
+                                              pdata->clksrc.shift);
 
-      pps_sub_ts(&pdata->ts, pdata->delta);
-      pps_event(pdata->pps, &pdata->ts, PPS_CAPTUREASSERT, NULL);
+    pps_sub_ts(&pdata->ts, pdata->delta);
+    pps_event(pdata->pps, &pdata->ts, PPS_CAPTUREASSERT, NULL);
 
-      pdata->capture++;
+    pdata->capture++;
 
-      __omap_dm_timer_write_status(pdata->capture_timer, OMAP_TIMER_INT_CAPTURE);
-    }
-    if(irq_status & OMAP_TIMER_INT_OVERFLOW) {
-      pdata->overflow++;
-      __omap_dm_timer_write_status(pdata->capture_timer, OMAP_TIMER_INT_OVERFLOW);
-    }
+    __omap_dm_timer_write_status(pdata->capture_timer, OMAP_TIMER_INT_CAPTURE);
+  }
+  if(irq_status & OMAP_TIMER_INT_OVERFLOW) {
+    pdata->overflow++;
+    __omap_dm_timer_write_status(pdata->capture_timer, OMAP_TIMER_INT_OVERFLOW);
   }
 
   return IRQ_HANDLED; // TODO: shared interrupts?
@@ -463,8 +460,6 @@ static struct pps_gmtimer_platform_data *of_get_pps_gmtimer_pdata(struct platfor
   if (!pdata)
     return NULL;
 
-  pdata->ready = 0;
-
   timer_phandle = of_get_property(np, "timer", NULL);
   if(!timer_phandle) {
     pr_err("timer property in devicetree null\n");
@@ -515,8 +510,6 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   if(!pdata)
     return -ENODEV;
 
-  pdata->ready = 0;
-
   if(sysfs_create_group(&pdev->dev.kobj, &attr_group)) {
     pr_err("sysfs_create_group failed\n");
   }
@@ -547,8 +540,6 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   if (pdata->pps == NULL) {
     pr_err("failed to register %s as PPS source\n", pdata->timer_name);
   } else {
-    // ready to go
-    pdata->ready = 1;
 
     pps_gmtimer_clocksource_init(pdata, badfreq);
 
