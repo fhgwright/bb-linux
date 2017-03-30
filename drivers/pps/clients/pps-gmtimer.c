@@ -55,9 +55,14 @@ MODULE_VERSION("0.1.0");
 #define MINIMUM_DT_FREQUENCY 10000000
 #define MAXIMUM_DT_FREQUENCY 24000000
 
+/* Flag bits */
+#define FLAG_USING_TCLKIN	(1<<0)
+#define FLAG_IS_CLOCKSOURCE	(1<<1)
+
 struct pps_gmtimer_platform_data {
   struct clocksource clksrc;  // First since it may be used frequently
   struct omap_dm_timer *capture_timer;
+  uint32_t flags;
   uint32_t frequency;
   unsigned int capture;
   unsigned int overflow;
@@ -73,7 +78,6 @@ struct pps_gmtimer_platform_data {
   struct timespec delta;
   struct pps_device *pps;
   struct pps_source_info info;
-  int is_clocksource;  //FIXME: Create flags cell
 };
 
 /* helpers *******************/
@@ -345,6 +349,7 @@ static int omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
   int badfreq = 0;
 
   omap_dm_timer_set_source(pdata->capture_timer, OMAP_TIMER_SRC_EXT_CLK);
+  pdata->flags |= FLAG_USING_TCLKIN;
   frequency = pdata->dt_frequency;
   if (frequency < MINIMUM_DT_FREQUENCY || frequency > MAXIMUM_DT_FREQUENCY) {
     gt_fclk = omap_dm_timer_get_fclk(pdata->capture_timer);
@@ -392,11 +397,6 @@ static int pps_gmtimer_init_timer(struct device_node *timer_dn, struct pps_gmtim
   gt_fclk = omap_dm_timer_get_fclk(pdata->capture_timer);
   pdata->frequency = clk_get_rate(gt_fclk);
 
-  pdata->capture_at_interrupt = 0;
-  pdata->capture_diff = 0;
-  pdata->capture_spread = 0;
-  pdata->is_clocksource = 0;
-
   pr_info("timer name=%s rate=%uHz\n", pdata->timer_name, pdata->frequency);
 
   return 0;
@@ -439,14 +439,14 @@ static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata
     pr_err("Could not register clocksource %s\n", pdata->clksrc.name);
   } else {
     pr_info("clocksource: %s at %u Hz\n", pdata->clksrc.name, pdata->frequency);
-    pdata->is_clocksource = 1;
+    pdata->flags |= FLAG_IS_CLOCKSOURCE;
   }
 }
 
 static void pps_gmtimer_clocksource_cleanup(struct pps_gmtimer_platform_data *pdata) {
-  if(pdata->is_clocksource) {
+  if(pdata->flags & FLAG_IS_CLOCKSOURCE) {
     clocksource_unregister(&pdata->clksrc);
-    pdata->is_clocksource = 0;
+    pdata->flags &= ~FLAG_IS_CLOCKSOURCE;
   }
 }
 
