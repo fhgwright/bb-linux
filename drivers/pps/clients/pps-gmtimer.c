@@ -62,16 +62,16 @@ MODULE_VERSION("0.1.0");
 struct pps_gmtimer_platform_data {
   struct clocksource clksrc;  // First since it may be used frequently
   struct omap_dm_timer *capture_timer;
-  uint32_t flags;
-  uint32_t frequency;
-  unsigned int capture;
-  unsigned int overflow;
-  unsigned int count_at_interrupt;
-  unsigned int capture_at_interrupt;
-  unsigned int capture_diff;
-  unsigned int capture_spread;
-  unsigned int interrupt_delay;
-  unsigned int dt_frequency;
+  u32 flags;
+  u32 frequency;
+  u32 capture;
+  u32 overflow;
+  u32 count_at_interrupt;
+  u32 capture_at_interrupt;
+  u32 capture_diff;
+  u32 capture_spread;
+  u32 interrupt_delay;
+  u32 dt_frequency;
   const char *timer_name;
   struct pps_event_time ts;
   struct pps_event_time ts_last, ts_prev;
@@ -88,7 +88,7 @@ struct pps_gmtimer_platform_data {
  * to the same register, and since we never write the counter, the check
  * would just be a pointless (and time-wasting) extra register read.
  */
-static inline unsigned int read_timer_counter(struct omap_dm_timer *timer)
+static inline u32 read_timer_counter(struct omap_dm_timer *timer)
 {
   return __omap_dm_timer_read_counter(timer, 0);
 }
@@ -147,7 +147,7 @@ static DEVICE_ATTR(ctrlstatus, S_IRUGO, ctrlstatus_show, NULL);
 
 static ssize_t timer_counter_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  unsigned int current_count = 0;
+  u32 current_count = 0;
 
   current_count = read_timer_counter(pdata->capture_timer);
   return sprintf(buf, "%u\n", current_count);
@@ -172,7 +172,7 @@ static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
 static ssize_t capture_uncertainty_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   struct clocksource *clk = &pdata->clksrc;
-  uint32_t nanos = clocksource_cyc2ns(pdata->capture_spread,
+  u32 nanos = clocksource_cyc2ns(pdata->capture_spread,
                                       clk->mult, clk->shift);
   return sprintf(buf, "0.%.09u\n", nanos);
 }
@@ -243,10 +243,10 @@ static struct attribute_group attr_group = {
 static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
   struct pps_gmtimer_platform_data *pdata = data;
   struct omap_dm_timer *timer = pdata->capture_timer;
-  uint32_t irq_status = omap_dm_timer_read_status(timer);
+  u32 irq_status = omap_dm_timer_read_status(timer);
 
   if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-    uint32_t count_at_capture, first, before, middle, after, spread, delta;
+    u32 count_at_capture, first, before, middle, after, spread, delta;
     struct pps_event_time ts1, ts2, *tsp;
 
     /*
@@ -357,7 +357,7 @@ static void omap_dm_timer_setup_capture(struct omap_dm_timer *timer) {
  */
 static int omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
   struct clk *gt_fclk;
-  unsigned int frequency;
+  u32 frequency;
   int badfreq = 0;
 
   omap_dm_timer_set_source(pdata->capture_timer, OMAP_TIMER_SRC_EXT_CLK);
@@ -375,7 +375,7 @@ static int omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
 }
 
 static void pps_gmtimer_enable_irq(struct pps_gmtimer_platform_data *pdata) {
-  unsigned int interrupt_mask;
+  u32 interrupt_mask;
 
   interrupt_mask = OMAP_TIMER_INT_CAPTURE|OMAP_TIMER_INT_OVERFLOW;
   __omap_dm_timer_int_enable(pdata->capture_timer, interrupt_mask);
