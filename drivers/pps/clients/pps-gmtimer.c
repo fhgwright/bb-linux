@@ -224,6 +224,13 @@ static ssize_t nominal_frequency_show(struct device *dev, struct device_attribut
 
 static DEVICE_ATTR(nominal_frequency, S_IRUGO, nominal_frequency_show, NULL);
 
+static ssize_t cycle_last_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%llu\n", (unsigned long long) pdata->clksrc.cycle_last);
+}
+
+static DEVICE_ATTR(cycle_last, S_IRUGO, cycle_last_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -241,6 +248,7 @@ static struct attribute *attrs[] = {
    &dev_attr_interrupt_delay.attr,
    &dev_attr_devtree_frequency.attr,
    &dev_attr_nominal_frequency.attr,
+   &dev_attr_cycle_last.attr,
    NULL,
 };
 
