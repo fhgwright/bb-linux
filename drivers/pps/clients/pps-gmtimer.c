@@ -72,6 +72,7 @@ struct pps_gmtimer_platform_data {
   u32 capture_spread;
   u32 interrupt_delay;
   u32 dt_frequency;
+  u32 nominal_frequency;
   const char *timer_name;
   struct pps_event_time ts;
   struct pps_event_time ts_last, ts_prev;
@@ -216,6 +217,13 @@ static ssize_t devtree_frequency_show(struct device *dev, struct device_attribut
 
 static DEVICE_ATTR(devtree_frequency, S_IRUGO, devtree_frequency_show, NULL);
 
+static ssize_t nominal_frequency_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%u\n", pdata->nominal_frequency);
+}
+
+static DEVICE_ATTR(nominal_frequency, S_IRUGO, nominal_frequency_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -232,6 +240,7 @@ static struct attribute *attrs[] = {
    &dev_attr_interrupt_prev_ts.attr,
    &dev_attr_interrupt_delay.attr,
    &dev_attr_devtree_frequency.attr,
+   &dev_attr_nominal_frequency.attr,
    NULL,
 };
 
@@ -540,8 +549,10 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   use_tclkin = of_get_property(pdev->dev.of_node, "use-tclkin", NULL);
   if(use_tclkin && be32_to_cpup(use_tclkin) == 1) {
     badfreq = omap_dm_timer_use_tclkin(pdata);
+    pdata->nominal_frequency = 0;
   } else {
     pr_info("using system clock\n");
+    pdata->nominal_frequency = pdata->frequency;
   }
 
   pdata->info.mode = PPS_CAPTUREASSERT | PPS_ECHOASSERT | PPS_CANWAIT | PPS_TSFMT_TSPEC;
