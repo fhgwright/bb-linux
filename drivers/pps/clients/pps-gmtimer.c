@@ -231,6 +231,14 @@ static ssize_t cycle_last_show(struct device *dev, struct device_attribute *attr
 
 static DEVICE_ATTR(cycle_last, S_IRUGO, cycle_last_show, NULL);
 
+static ssize_t clock_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%s\n",
+                 pdata->flags & FLAG_USING_TCLKIN ? "external" : "system");
+}
+
+static DEVICE_ATTR(clock, S_IRUGO, clock_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -249,6 +257,7 @@ static struct attribute *attrs[] = {
    &dev_attr_devtree_frequency.attr,
    &dev_attr_nominal_frequency.attr,
    &dev_attr_cycle_last.attr,
+   &dev_attr_clock.attr,
    NULL,
 };
 
