@@ -94,6 +94,16 @@ static inline u32 read_timer_counter(struct omap_dm_timer *timer)
   return __omap_dm_timer_read_counter(timer, 0);
 }
 
+/*
+ * Convert cycles to nanoseconds, with rounding.
+ * Note that the shift is no more than 32, so the shifted rounding bit is
+ * guaranteed to fit in 32 bits.
+ */
+static inline u64 rounded_cyc2ns(u32 cycles, const struct clocksource *clk)
+{
+  return ((u64) cycles * clk->mult + (1U << (clk->shift - 1))) >> clk->shift;
+}
+
 /* kobject *******************/
 static ssize_t timer_name_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
@@ -172,9 +182,7 @@ static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
 
 static ssize_t capture_uncertainty_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  struct clocksource *clk = &pdata->clksrc;
-  u32 nanos = clocksource_cyc2ns(pdata->capture_spread,
-                                      clk->mult, clk->shift);
+  u32 nanos = rounded_cyc2ns(pdata->capture_spread, &pdata->clksrc);
   return sprintf(buf, "0.%.09u\n", nanos);
 }
 
@@ -324,9 +332,7 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
     delta = pdata->count_at_interrupt - count_at_capture;
 
     pdata->delta.tv_sec = 0;
-    pdata->delta.tv_nsec = clocksource_cyc2ns(delta,
-                                              pdata->clksrc.mult,
-                                              pdata->clksrc.shift);
+    pdata->delta.tv_nsec = rounded_cyc2ns(delta, &pdata->clksrc);
 
     pdata->ts_prev = pdata->ts_last;
     pdata->ts_last = *tsp;
