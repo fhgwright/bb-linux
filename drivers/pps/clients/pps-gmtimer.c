@@ -61,6 +61,9 @@ MODULE_VERSION("0.1.0");
 #define MIN_EXT_FREQUENCY	 1000000
 #define MAX_EXT_FREQUENCY	24000000
 
+/* Maximum period between extension updates (3/4 of full cycle) */
+#define MAX_MATCH_DELAY		0xC0000000
+
 /* Flag bits */
 #define FLAG_USING_TCLKIN	(1<<0)
 #define FLAG_IS_CLOCKSOURCE	(1<<1)
@@ -69,13 +72,16 @@ MODULE_VERSION("0.1.0");
 struct pps_gmtimer_platform_data {
   struct clocksource clksrc;  // First since it may be used frequently
   struct omap_dm_timer *capture_timer;
+  u32 extension_last;
+  u64 extension_offset;
   u32 flags;
   u32 frequency;
   u32 capture;
+  u32 match;
   u32 overflow;
-  u32 count_at_interrupt;
-  u32 capture_at_interrupt;
-  u32 capture_diff;
+  u64 count_at_interrupt;
+  u64 capture_at_interrupt;
+  u64 capture_diff;
   u32 capture_spread;
   u32 interrupt_delay;
   u32 dt_frequency;
@@ -145,6 +151,34 @@ static int clocksource_update_frequency(struct clocksource *clk, u32 frequency)
   return 0;
 }
 
+/* Read register, with posting check */
+static u32 read_timer_reg(struct omap_dm_timer *timer, u32 reg)
+{
+	return __omap_dm_timer_read(timer, reg, timer->posted);
+}
+
+/* Write register, with posting check */
+static void write_timer_reg(struct omap_dm_timer *timer, u32 reg, u32 value)
+{
+	__omap_dm_timer_write(timer, reg, value, timer->posted);
+}
+
+/* Update parameters for 64-bit value extension, based on reference value */
+static void update_extension(struct pps_gmtimer_platform_data *pdata, u32 ref)
+{
+  u32 diff = ref - pdata->extension_last;
+  pdata->extension_last += diff;
+  pdata->extension_offset += diff;
+  write_timer_reg(pdata->capture_timer,
+                  OMAP_TIMER_MATCH_REG, ref + MAX_MATCH_DELAY);
+}
+
+/* Extend 32-bit counter value to 64 bits */
+static u64 extend_count(struct pps_gmtimer_platform_data *pdata, u32 count)
+{
+  return count - pdata->extension_last + pdata->extension_offset;
+}
+
 /* kobject *******************/
 static ssize_t timer_name_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
@@ -155,7 +189,8 @@ static DEVICE_ATTR(timer_name, S_IRUGO, timer_name_show, NULL);
 
 static ssize_t stats_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "capture: %u\noverflow: %u\n", pdata->capture, pdata->overflow);
+  return sprintf(buf, "capture: %u\nmatch: %u\noverflow: %u\n",
+                 pdata->capture, pdata->match, pdata->overflow);
 }
 
 static DEVICE_ATTR(stats, S_IRUGO, stats_show, NULL);
@@ -176,14 +211,15 @@ static DEVICE_ATTR(pps_ts, S_IRUGO, pps_ts_show, NULL);
 
 static ssize_t count_at_interrupt_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%u\n", pdata->count_at_interrupt);
+  return sprintf(buf, "%llu\n", (unsigned long long) pdata->count_at_interrupt);
 }
 
 static DEVICE_ATTR(count_at_interrupt, S_IRUGO, count_at_interrupt_show, NULL);
 
 static ssize_t capture_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%u\n", pdata->capture_at_interrupt);
+  return sprintf(buf, "%llu\n",
+                (unsigned long long) pdata->capture_at_interrupt);
 }
 
 static DEVICE_ATTR(capture, S_IRUGO, capture_show, NULL);
@@ -191,7 +227,7 @@ static DEVICE_ATTR(capture, S_IRUGO, capture_show, NULL);
 static ssize_t ctrlstatus_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%x\n",
-      __omap_dm_timer_read(pdata->capture_timer, OMAP_TIMER_CTRL_REG, pdata->capture_timer->posted)
+      read_timer_reg(pdata->capture_timer, OMAP_TIMER_CTRL_REG)
       );
 }
 
@@ -199,10 +235,16 @@ static DEVICE_ATTR(ctrlstatus, S_IRUGO, ctrlstatus_show, NULL);
 
 static ssize_t timer_counter_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  u32 current_count = 0;
+  u64 offset;
+  unsigned long long full_count;
 
-  current_count = read_timer_counter(pdata->capture_timer);
-  return sprintf(buf, "%u\n", current_count);
+  // Make sure we see a consistent offset for the counter
+  do {
+    offset = pdata->extension_offset;
+    full_count = extend_count(pdata, read_timer_counter(pdata->capture_timer));
+  } while (pdata->extension_offset != offset);
+
+  return sprintf(buf, "%llu\n", full_count);
 }
 
 static DEVICE_ATTR(timer_counter, S_IRUGO, timer_counter_show, NULL);
@@ -238,7 +280,7 @@ static DEVICE_ATTR(frequency, S_IRUGO | S_IWUSR, frequency_show, frequency_set);
 
 static ssize_t capture_diff_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%u\n", pdata->capture_diff);
+  return sprintf(buf, "%llu\n", (unsigned long long) pdata->capture_diff);
 }
 
 static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
@@ -374,7 +416,9 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
   u32 irq_status = omap_dm_timer_read_status(timer);
 
   if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-    u32 count_at_capture, first, before, middle, after, spread, delta;
+    u32 count_at_capture, count_at_interrupt;
+    u32 first, before, middle, after, spread, delta;
+    u64 full_capture;
     struct pps_event_time ts1, ts2, *tsp;
 
     /*
@@ -414,16 +458,21 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
      */
     spread = after - before;
     pdata->capture_spread = spread + 2;
-    pdata->count_at_interrupt = before + ((spread + 1) >> 1);
+    count_at_interrupt = before + ((spread + 1) >> 1);
 
     count_at_capture = __omap_dm_timer_read(timer,
                                             OMAP_TIMER_CAPTURE_REG, 0);
-    pdata->capture_diff = count_at_capture - pdata->capture_at_interrupt;
-    pdata->capture_at_interrupt = count_at_capture;
+    update_extension(pdata, count_at_capture);
+
+    full_capture = extend_count(pdata, count_at_capture);
+    pdata->capture_diff = full_capture - pdata->capture_at_interrupt;
+    pdata->capture_at_interrupt = full_capture;
+
+    pdata->count_at_interrupt = extend_count(pdata, count_at_interrupt);
 
     pdata->interrupt_delay = first - count_at_capture;
 
-    delta = pdata->count_at_interrupt - count_at_capture;
+    delta = count_at_interrupt - count_at_capture;
 
     pdata->delta.tv_sec = 0;
     pdata->delta.tv_nsec = rounded_cyc2ns(delta, &pdata->clksrc);
@@ -444,6 +493,15 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
     pdata->overflow++;
     __omap_dm_timer_write_status(timer, OMAP_TIMER_INT_OVERFLOW);
   }
+  if(irq_status & OMAP_TIMER_INT_MATCH) {
+    // Don't double update in rare coincidence
+    if(!(irq_status & OMAP_TIMER_INT_CAPTURE)) {
+      u32 match = read_timer_reg(timer, OMAP_TIMER_MATCH_REG);
+      update_extension(pdata, match);
+    }
+    pdata->match++;
+    __omap_dm_timer_write_status(timer, OMAP_TIMER_INT_MATCH);
+  }
 
   return IRQ_HANDLED; // TODO: shared interrupts?
 }
@@ -455,20 +513,26 @@ static void omap_dm_timer_setup_capture(struct omap_dm_timer *timer) {
 
   omap_dm_timer_enable(timer);
 
-  ctrl = __omap_dm_timer_read(timer, OMAP_TIMER_CTRL_REG, timer->posted);
+  ctrl = read_timer_reg(timer, OMAP_TIMER_CTRL_REG);
 
   // disable prescaler
   ctrl &= ~(OMAP_TIMER_CTRL_PRE | (0x07 << 2));
 
   // autoreload
   ctrl |= OMAP_TIMER_CTRL_AR;
-  __omap_dm_timer_write(timer, OMAP_TIMER_LOAD_REG, 0, timer->posted);
+  write_timer_reg(timer, OMAP_TIMER_LOAD_REG, 0);
 
   // start timer
   ctrl |= OMAP_TIMER_CTRL_ST;
 
   // set capture
   ctrl |= OMAP_TIMER_CTRL_TCM_LOWTOHIGH | OMAP_TIMER_CTRL_GPOCFG; // TODO: configurable direction
+
+  // Arm match as well (to maintain extension w/o PPS)
+  ctrl |= OMAP_TIMER_CTRL_CE;
+
+  // Set up initial match
+  write_timer_reg(timer, OMAP_TIMER_MATCH_REG, MAX_MATCH_DELAY);
 
   __omap_dm_timer_load_start(timer, ctrl, 0, timer->posted);
 
@@ -503,7 +567,8 @@ static int omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
 static void pps_gmtimer_enable_irq(struct pps_gmtimer_platform_data *pdata) {
   u32 interrupt_mask;
 
-  interrupt_mask = OMAP_TIMER_INT_CAPTURE|OMAP_TIMER_INT_OVERFLOW;
+  interrupt_mask = OMAP_TIMER_INT_CAPTURE
+                   | OMAP_TIMER_INT_OVERFLOW | OMAP_TIMER_INT_MATCH;
   __omap_dm_timer_int_enable(pdata->capture_timer, interrupt_mask);
   pdata->capture_timer->context.tier = interrupt_mask;
   pdata->capture_timer->context.twer = interrupt_mask;
