@@ -43,6 +43,8 @@
 #include <linux/pps_kernel.h>
 #include <linux/clocksource.h>
 #include <linux/time.h>
+#include <linux/spinlock.h>
+#include <linux/spinlock_types.h>
 
 #include <plat/dmtimer.h>
 
@@ -51,13 +53,18 @@ MODULE_AUTHOR("Dan Drown");
 MODULE_DESCRIPTION("PPS Client Driver using OMAP Timer hardware");
 MODULE_VERSION("0.1.0");
 
-/* Sanity checks */
-#define MINIMUM_DT_FREQUENCY 10000000
-#define MAXIMUM_DT_FREQUENCY 24000000
+/* Frequency tolerances */
+#define FREQ_TOLER_PPM		200
+#define FREQ_TOLER_DIV		(1000000 / FREQ_TOLER_PPM)
+
+/* TCLKIN plausible nominal frequency range */
+#define MIN_EXT_FREQUENCY	 1000000
+#define MAX_EXT_FREQUENCY	24000000
 
 /* Flag bits */
 #define FLAG_USING_TCLKIN	(1<<0)
 #define FLAG_IS_CLOCKSOURCE	(1<<1)
+#define FLAG_CLOCKSOURCE_ACTIVE	(1<<2)
 
 struct pps_gmtimer_platform_data {
   struct clocksource clksrc;  // First since it may be used frequently
@@ -81,6 +88,9 @@ struct pps_gmtimer_platform_data {
   struct pps_source_info info;
 };
 
+/* Lock for setting frequency params */
+static DEFINE_SPINLOCK(freq_lock);
+
 /* helpers *******************/
 
 /*
@@ -102,6 +112,37 @@ static inline u32 read_timer_counter(struct omap_dm_timer *timer)
 static inline u64 rounded_cyc2ns(u32 cycles, const struct clocksource *clk)
 {
   return ((u64) cycles * clk->mult + (1U << (clk->shift - 1))) >> clk->shift;
+}
+
+/* Set frequency of this clocksource */
+static void clocksource_set_frequency(struct clocksource *clk, u32 frequency)
+{
+  clocks_calc_mult_shift(&clk->mult, &clk->shift, frequency, NSEC_PER_SEC, 1);
+}
+
+/* Register this timer's clocksource, if possible */
+static void register_clocksource(struct pps_gmtimer_platform_data *pdata)
+{
+  if (clocksource_register_hz(&pdata->clksrc, pdata->frequency)) {
+    pr_err("Could not register clocksource %s\n", pdata->clksrc.name);
+  } else {
+    pr_info("clocksource: %s at %u Hz\n", pdata->clksrc.name, pdata->frequency);
+    pdata->flags |= FLAG_IS_CLOCKSOURCE;
+  }
+}
+
+/*
+ * Update frequency of this clocksource after initialization.
+ * This can't be done safely for the current timekeeper clocksource, so we
+ * disallow it in that case.
+ */
+static int clocksource_update_frequency(struct clocksource *clk, u32 frequency)
+{
+  struct pps_gmtimer_platform_data *pdata = container_of(clk, struct pps_gmtimer_platform_data, clksrc);
+  if (pdata->flags & FLAG_CLOCKSOURCE_ACTIVE)
+    return -EPERM;
+  clocksource_set_frequency(clk, frequency);
+  return 0;
 }
 
 /* kobject *******************/
@@ -171,7 +212,29 @@ static ssize_t frequency_show(struct device *dev, struct device_attribute *attr,
   return sprintf(buf, "%u\n", pdata->frequency);
 }
 
-static DEVICE_ATTR(frequency, S_IRUGO, frequency_show, NULL);
+static ssize_t frequency_set(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  unsigned long freq, flags;
+  u32 nom_freq;
+  int status;
+
+  if (strict_strtoul(buf, 0, &freq) < 0)
+    return -EINVAL;
+  spin_lock_irqsave(&freq_lock, flags);
+  nom_freq = pdata->nominal_frequency;
+  // Freq must be within range of known nominal
+  if (nom_freq == 0 || freq < nom_freq - nom_freq / FREQ_TOLER_DIV
+      || freq > nom_freq + nom_freq / FREQ_TOLER_DIV)
+    status = -EINVAL;
+  else
+    status = clocksource_update_frequency(&pdata->clksrc, freq);
+  if (status == 0)
+    pdata->frequency = freq;
+  spin_unlock_irqrestore(&freq_lock, flags);
+  return status ? status : count;
+}
+
+static DEVICE_ATTR(frequency, S_IRUGO | S_IWUSR, frequency_show, frequency_set);
 
 static ssize_t capture_diff_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
@@ -230,7 +293,38 @@ static ssize_t nominal_frequency_show(struct device *dev, struct device_attribut
   return sprintf(buf, "%u\n", pdata->nominal_frequency);
 }
 
-static DEVICE_ATTR(nominal_frequency, S_IRUGO, nominal_frequency_show, NULL);
+static ssize_t nominal_frequency_set(struct device *dev, struct device_attribute *attr, const char *buf, size_t count) {
+  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  unsigned long freq;
+  int status = 0;
+
+  if (strict_strtoul(buf, 0, &freq) < 0)
+    return -EINVAL;
+  if (pdata->flags & FLAG_USING_TCLKIN) {
+    if (freq < MIN_EXT_FREQUENCY || freq > MAX_EXT_FREQUENCY)
+      return -EINVAL;
+  } else {
+    return -EPERM;
+  }
+  spin_lock(&freq_lock);
+  // Redundant for now, but maybe not so later
+  if (pdata->flags & FLAG_CLOCKSOURCE_ACTIVE)
+    status = -EPERM;
+  else {
+    status = clocksource_update_frequency(&pdata->clksrc, freq);
+    if (status == 0) {
+      pdata->frequency = freq;
+      pdata->nominal_frequency = freq;
+      if (!(pdata->flags & FLAG_IS_CLOCKSOURCE))
+        register_clocksource(pdata);  // Now it's usable
+    }
+  }
+  spin_unlock(&freq_lock);
+  return status ? status : count;
+}
+
+static DEVICE_ATTR(nominal_frequency, S_IRUGO | S_IWUSR,
+                   nominal_frequency_show, nominal_frequency_set);
 
 static ssize_t cycle_last_show(struct device *dev, struct device_attribute *attr, char *buf) {
   struct pps_gmtimer_platform_data *pdata = dev->platform_data;
@@ -395,7 +489,7 @@ static int omap_dm_timer_use_tclkin(struct pps_gmtimer_platform_data *pdata) {
   omap_dm_timer_set_source(pdata->capture_timer, OMAP_TIMER_SRC_EXT_CLK);
   pdata->flags |= FLAG_USING_TCLKIN;
   frequency = pdata->dt_frequency;
-  if (frequency < MINIMUM_DT_FREQUENCY || frequency > MAXIMUM_DT_FREQUENCY) {
+  if (frequency < MIN_EXT_FREQUENCY || frequency > MAX_EXT_FREQUENCY) {
     gt_fclk = omap_dm_timer_get_fclk(pdata->capture_timer);
     frequency = clk_get_rate(gt_fclk);
     badfreq = 1;
@@ -465,26 +559,35 @@ static cycle_t pps_gmtimer_read_cycles(struct clocksource *cs) {
   return (cycle_t) read_timer_counter(pdata->capture_timer);
 }
 
+static int clocksource_enable(struct clocksource *cs) {
+  struct pps_gmtimer_platform_data *pdata = container_of(cs, struct pps_gmtimer_platform_data, clksrc);
+  if (pdata->flags & FLAG_CLOCKSOURCE_ACTIVE)
+    return 1;  // Avoid unwanted disable on NOP switch
+  pdata->flags |= FLAG_CLOCKSOURCE_ACTIVE;
+  return 0;
+}
+
+static void clocksource_disable(struct clocksource *cs) {
+  struct pps_gmtimer_platform_data *pdata = container_of(cs, struct pps_gmtimer_platform_data, clksrc);
+  pdata->flags &= ~FLAG_CLOCKSOURCE_ACTIVE;
+}
+
 static void pps_gmtimer_clocksource_init(struct pps_gmtimer_platform_data *pdata, int badfreq) {
   pdata->clksrc.name = pdata->timer_name;
 
   pdata->clksrc.rating = 299;
   pdata->clksrc.read = pps_gmtimer_read_cycles;
+  pdata->clksrc.enable = clocksource_enable;
+  pdata->clksrc.disable = clocksource_disable;
   pdata->clksrc.mask = CLOCKSOURCE_MASK(32);
   pdata->clksrc.flags = CLOCK_SOURCE_IS_CONTINUOUS;
 
   if (badfreq) {
     // Don't register it as a clocksource, but set up conversion factors.
-    clocks_calc_mult_shift(&pdata->clksrc.mult, &pdata->clksrc.shift,
-                           pdata->frequency, NSEC_PER_SEC, 1);
+    clocksource_set_frequency(&pdata->clksrc, pdata->frequency);
     return;
   }
-  if (clocksource_register_hz(&pdata->clksrc, pdata->frequency)) {
-    pr_err("Could not register clocksource %s\n", pdata->clksrc.name);
-  } else {
-    pr_info("clocksource: %s at %u Hz\n", pdata->clksrc.name, pdata->frequency);
-    pdata->flags |= FLAG_IS_CLOCKSOURCE;
-  }
+  register_clocksource(pdata);
 }
 
 static void pps_gmtimer_clocksource_cleanup(struct pps_gmtimer_platform_data *pdata) {
@@ -572,7 +675,7 @@ static int pps_gmtimer_probe(struct platform_device *pdev) {
   use_tclkin = of_get_property(pdev->dev.of_node, "use-tclkin", NULL);
   if(use_tclkin && be32_to_cpup(use_tclkin) == 1) {
     badfreq = omap_dm_timer_use_tclkin(pdata);
-    pdata->nominal_frequency = 0;
+    pdata->nominal_frequency = pdata->dt_frequency;
   } else {
     pr_info("using system clock\n");
     pdata->nominal_frequency = pdata->frequency;
