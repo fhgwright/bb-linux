@@ -174,58 +174,91 @@ static void update_extension(struct pps_gmtimer_platform_data *pdata, u32 ref)
 }
 
 /* Extend 32-bit counter value to 64 bits */
-static u64 extend_count(struct pps_gmtimer_platform_data *pdata, u32 count)
+static u64 extend_count(const struct pps_gmtimer_platform_data *pdata,
+                        u32 count)
 {
   return count - pdata->extension_last + pdata->extension_offset;
 }
 
+/* Fetch 64-bit value "atomically" (unsigned long long for sprintf) */
+static unsigned long long fetch_u64(const volatile u64 *adr)
+{
+  u64 val;
+  do {
+    val = *adr;
+  } while (val != *adr);
+  return val;
+}
+
+/* Fetch pps_ts "atomically" */
+static void fetch_pps_ts(const volatile struct pps_event_time *src,
+                         struct pps_event_time *dst)
+{
+  do {
+    *dst = *src;
+#ifdef CONFIG_NTP_PPS
+    if (dst->ts_raw.tv_sec != src->ts_raw.tv_sec
+        || dst->ts_raw.tv_sec != src->ts_raw.tv_sec)
+      continue;
+#endif /* CONFIG_NTP_PPS */
+  } while (dst->ts_real.tv_sec != src->ts_real.tv_sec
+           || dst->ts_real.tv_sec != src->ts_real.tv_sec);
+}
+
 /* kobject *******************/
 static ssize_t timer_name_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%s\n", pdata->timer_name);
 }
 
 static DEVICE_ATTR(timer_name, S_IRUGO, timer_name_show, NULL);
 
 static ssize_t stats_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const volatile struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  u32 capture, match, overflow;
+  do {
+    capture = pdata->capture; match = pdata->match; overflow = pdata->overflow;
+  } while (capture != pdata->capture || match != pdata->match
+           || overflow != pdata->overflow);
   return sprintf(buf, "capture: %u\nmatch: %u\noverflow: %u\n",
-                 pdata->capture, pdata->match, pdata->overflow);
+                 capture, match, overflow);
 }
 
 static DEVICE_ATTR(stats, S_IRUGO, stats_show, NULL);
 
 static ssize_t interrupt_delta_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%lld.%09ld\n", (long long)pdata->delta.tv_sec, pdata->delta.tv_nsec);
 }
 
 static DEVICE_ATTR(interrupt_delta, S_IRUGO, interrupt_delta_show, NULL);
 
 static ssize_t pps_ts_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%lld.%09ld\n", (long long)pdata->ts.ts_real.tv_sec, pdata->ts.ts_real.tv_nsec);
+  const volatile struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  struct pps_event_time ts;
+  fetch_pps_ts(&pdata->ts, &ts);
+  return sprintf(buf, "%lld.%09ld\n",
+                (long long) ts.ts_real.tv_sec, ts.ts_real.tv_nsec);
 }
 
 static DEVICE_ATTR(pps_ts, S_IRUGO, pps_ts_show, NULL);
 
 static ssize_t count_at_interrupt_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%llu\n", (unsigned long long) pdata->count_at_interrupt);
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%llu\n", fetch_u64(&pdata->count_at_interrupt));
 }
 
 static DEVICE_ATTR(count_at_interrupt, S_IRUGO, count_at_interrupt_show, NULL);
 
 static ssize_t capture_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%llu\n",
-                (unsigned long long) pdata->capture_at_interrupt);
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%llu\n", fetch_u64(&pdata->capture_at_interrupt));
 }
 
 static DEVICE_ATTR(capture, S_IRUGO, capture_show, NULL);
 
 static ssize_t ctrlstatus_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%x\n",
       read_timer_reg(pdata->capture_timer, OMAP_TIMER_CTRL_REG)
       );
@@ -234,15 +267,16 @@ static ssize_t ctrlstatus_show(struct device *dev, struct device_attribute *attr
 static DEVICE_ATTR(ctrlstatus, S_IRUGO, ctrlstatus_show, NULL);
 
 static ssize_t timer_counter_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const volatile struct pps_gmtimer_platform_data *vdata = pdata;
   u64 offset;
   unsigned long long full_count;
 
   // Make sure we see a consistent offset for the counter
   do {
-    offset = pdata->extension_offset;
+    offset = vdata->extension_offset;
     full_count = extend_count(pdata, read_timer_counter(pdata->capture_timer));
-  } while (pdata->extension_offset != offset);
+  } while (vdata->extension_offset != offset);
 
   return sprintf(buf, "%llu\n", full_count);
 }
@@ -250,7 +284,7 @@ static ssize_t timer_counter_show(struct device *dev, struct device_attribute *a
 static DEVICE_ATTR(timer_counter, S_IRUGO, timer_counter_show, NULL);
 
 static ssize_t frequency_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%u\n", pdata->frequency);
 }
 
@@ -279,59 +313,68 @@ static ssize_t frequency_set(struct device *dev, struct device_attribute *attr, 
 static DEVICE_ATTR(frequency, S_IRUGO | S_IWUSR, frequency_show, frequency_set);
 
 static ssize_t capture_diff_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%llu\n", (unsigned long long) pdata->capture_diff);
+  const volatile struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%llu\n", fetch_u64(&pdata->capture_diff));
 }
 
 static DEVICE_ATTR(capture_diff, S_IRUGO, capture_diff_show, NULL);
 
 static ssize_t capture_uncertainty_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  u32 nanos = rounded_cyc2ns(pdata->capture_spread, &pdata->clksrc);
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct clocksource *clk = &pdata->clksrc;
+  const volatile struct clocksource *vclk = clk;
+  u32 mult, shift, spread, nanos;
+  do {
+    mult = vclk->mult; shift = vclk->shift; spread = pdata->capture_spread;
+    nanos = rounded_cyc2ns(spread, clk);
+  } while (mult != vclk->mult || shift != vclk->shift
+           || spread != pdata->capture_spread);
   return sprintf(buf, "0.%.09u\n", nanos);
 }
 
 static DEVICE_ATTR(capture_uncertainty, S_IRUGO, capture_uncertainty_show, NULL);
 
-static int print_pps(struct pps_event_time *ts, char *buf)
+static int print_pps(const volatile struct pps_event_time *ts, char *buf)
 {
+  struct pps_event_time lts;
+  fetch_pps_ts(ts, &lts);
 #ifdef CONFIG_NTP_PPS
-  return sprintf(buf, "%lld.%09ld, %lld.%09ld\n", (long long) ts->ts_real.tv_sec, ts->ts_real.tv_nsec, (long long) ts->ts_raw.tv_sec, ts->ts_raw.tv_nsec);
+  return sprintf(buf, "%lld.%09ld, %lld.%09ld\n", (long long) lts.ts_real.tv_sec, lts.ts_real.tv_nsec, (long long) lts.ts_raw.tv_sec, lts.ts_raw.tv_nsec);
 #else /* CONFIG_NTP_PPS */
-  return sprintf(buf, "%lld.%09ld\n", (long long) ts->ts_real.tv_sec, ts->ts_real.tv_nsec);
+  return sprintf(buf, "%lld.%09ld\n", (long long) lts.ts_real.tv_sec, lts.ts_real.tv_nsec);
 #endif /* CONFIG_NTP_PPS */
 }
 
 static ssize_t interrupt_ts_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const volatile struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return print_pps(&pdata->ts_last, buf);
 }
 
 static DEVICE_ATTR(interrupt_ts, S_IRUGO, interrupt_ts_show, NULL);
 
 static ssize_t interrupt_prev_ts_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const volatile struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return print_pps(&pdata->ts_prev, buf);
 }
 
 static DEVICE_ATTR(interrupt_prev_ts, S_IRUGO, interrupt_prev_ts_show, NULL);
 
 static ssize_t interrupt_delay_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%u\n", pdata->interrupt_delay);
 }
 
 static DEVICE_ATTR(interrupt_delay, S_IRUGO, interrupt_delay_show, NULL);
 
 static ssize_t devtree_frequency_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%u\n", pdata->dt_frequency);
 }
 
 static DEVICE_ATTR(devtree_frequency, S_IRUGO, devtree_frequency_show, NULL);
 
 static ssize_t nominal_frequency_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%u\n", pdata->nominal_frequency);
 }
 
@@ -369,14 +412,14 @@ static DEVICE_ATTR(nominal_frequency, S_IRUGO | S_IWUSR,
                    nominal_frequency_show, nominal_frequency_set);
 
 static ssize_t cycle_last_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
-  return sprintf(buf, "%llu\n", (unsigned long long) pdata->clksrc.cycle_last);
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%llu\n", fetch_u64(&pdata->clksrc.cycle_last));
 }
 
 static DEVICE_ATTR(cycle_last, S_IRUGO, cycle_last_show, NULL);
 
 static ssize_t clock_show(struct device *dev, struct device_attribute *attr, char *buf) {
-  struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
   return sprintf(buf, "%s\n",
                  pdata->flags & FLAG_USING_TCLKIN ? "external" : "system");
 }
