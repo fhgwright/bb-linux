@@ -45,6 +45,7 @@
 #include <linux/time.h>
 #include <linux/spinlock.h>
 #include <linux/spinlock_types.h>
+#include <asm/div64.h>
 
 #include <plat/dmtimer.h>
 
@@ -64,6 +65,10 @@ MODULE_VERSION("0.1.0");
 /* Maximum period between extension updates (3/4 of full cycle) */
 #define MAX_MATCH_DELAY		0xC0000000
 
+/* Second / nanosecond limits for 32 bits of nanoseconds */
+#define MAX_NSEC32_SECS		(UINT_MAX / NSEC_PER_SEC)
+#define MAX_NSEC32_NSECS	(UINT_MAX - MAX_NSEC32_SECS * NSEC_PER_SEC)
+
 /* Flag bits */
 #define FLAG_USING_TCLKIN	(1<<0)
 #define FLAG_IS_CLOCKSOURCE	(1<<1)
@@ -72,6 +77,7 @@ MODULE_VERSION("0.1.0");
 struct pps_gmtimer_platform_data {
   struct clocksource clksrc;  // First since it may be used frequently
   struct omap_dm_timer *capture_timer;
+  u32 last_interrupt_count;
   u32 extension_last;
   u64 extension_offset;
   u32 flags;
@@ -459,9 +465,10 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
   u32 irq_status = omap_dm_timer_read_status(timer);
 
   if(irq_status & OMAP_TIMER_INT_CAPTURE) {
-    u32 count_at_capture, count_at_interrupt;
-    u32 first, before, middle, after, spread, delta;
-    u64 full_capture;
+    u32 count_at_capture, count_at_interrupt, count_diff;
+    u32 first, before, middle, after, spread, delta, time_diff;
+    s32 sec_diff, nsec_diff;
+    u64 tmp64, full_capture;
     struct pps_event_time ts1, ts2, *tsp;
 
     /*
@@ -517,8 +524,54 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
 
     delta = count_at_interrupt - count_at_capture;
 
+    count_diff = count_at_interrupt - pdata->last_interrupt_count;
+    pdata->last_interrupt_count = count_at_interrupt;
+
+    /*
+     * Use the time difference between interrupts as a basis for frequency
+     * measurement and compensation.  We use the interrupt time instead of
+     * the capture time in order to decouple this calculation from previous
+     * frequency-impacted calculations.  Since we use the corresponding
+     * time differences and counter differences, the exact timing doesn't
+     * matter.
+     */
+    sec_diff = tsp->ts_real.tv_sec - pdata->ts_last.ts_real.tv_sec;
+    nsec_diff = tsp->ts_real.tv_nsec - pdata->ts_last.ts_real.tv_nsec;
+    if (nsec_diff < 0) {
+      --sec_diff; nsec_diff += NSEC_PER_SEC;
+    }
+    /*
+     * Limit the time range such that the nanosecond difference fits in
+     * 32 bits.  This allows a little over 4 seconds, which allows a few
+     * missing normal PPS events, or a single missing 0.5Hz "PPS" event.
+     *
+     * We want some sort of limit, anyway, to avoid basing calculations
+     * on excessively stale data.  If the previous event is too old, we
+     * simply use the assumed frequency, instead of a measured value.
+     * This means that the first PPS event after an outage may have a less
+     * accurate timestamp, but in many cases (e.g., recovering after the
+     * loss of a GPS fix) such a PPS event is less accurate, anyway.
+     *
+     * The check on count_diff is just paranoia to avoid a divide by 0,
+     * and should never actually fail.
+     */
+    if (count_diff != 0
+        && (sec_diff < MAX_NSEC32_SECS
+            || (sec_diff == MAX_NSEC32_SECS
+                && (u32) nsec_diff <= MAX_NSEC32_NSECS))) {
+      time_diff = sec_diff * NSEC_PER_SEC + nsec_diff;
+      /*
+       * Since the divisor is variable, we can't take the precomputed
+       * reciprocal approach used by cyc2ns, so we need a real 64-bit
+       * divide, but only with a 32-bit divisor.
+       */
+      tmp64 = (u64) delta * time_diff + (count_diff >> 1);
+      (void) do_div(tmp64, count_diff);
+      pdata->delta.tv_nsec = tmp64;
+    } else {
+      pdata->delta.tv_nsec = rounded_cyc2ns(delta, &pdata->clksrc);
+    }
     pdata->delta.tv_sec = 0;
-    pdata->delta.tv_nsec = rounded_cyc2ns(delta, &pdata->clksrc);
 
     pdata->ts_prev = pdata->ts_last;
     pdata->ts_last = *tsp;
