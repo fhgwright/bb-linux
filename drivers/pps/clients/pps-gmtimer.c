@@ -74,6 +74,17 @@ MODULE_VERSION("0.1.0");
 #define FLAG_IS_CLOCKSOURCE	(1<<1)
 #define FLAG_CLOCKSOURCE_ACTIVE	(1<<2)
 
+/* Methods for converting capture to time */
+typedef enum method {
+  METHOD_CONFIGURED_FREQ,
+  METHOD_MEASURED_FREQ,
+} method_t;
+
+static const char *method_names[] = {
+  "configured_frequency",
+  "measured_frequency",
+};
+
 struct pps_gmtimer_platform_data {
   struct clocksource clksrc;  // First since it may be used frequently
   struct omap_dm_timer *capture_timer;
@@ -81,6 +92,7 @@ struct pps_gmtimer_platform_data {
   u32 extension_last;
   u64 extension_offset;
   u32 flags;
+  method_t method;
   u32 frequency;
   u32 capture;
   u32 match;
@@ -432,6 +444,13 @@ static ssize_t clock_show(struct device *dev, struct device_attribute *attr, cha
 
 static DEVICE_ATTR(clock, S_IRUGO, clock_show, NULL);
 
+static ssize_t method_show(struct device *dev, struct device_attribute *attr, char *buf) {
+  const struct pps_gmtimer_platform_data *pdata = dev->platform_data;
+  return sprintf(buf, "%s\n", method_names[pdata->method]);
+}
+
+static DEVICE_ATTR(method, S_IRUGO, method_show, NULL);
+
 static struct attribute *attrs[] = {
    &dev_attr_timer_counter.attr,
    &dev_attr_ctrlstatus.attr,
@@ -451,6 +470,7 @@ static struct attribute *attrs[] = {
    &dev_attr_nominal_frequency.attr,
    &dev_attr_cycle_last.attr,
    &dev_attr_clock.attr,
+   &dev_attr_method.attr,
    NULL,
 };
 
@@ -568,8 +588,10 @@ static irqreturn_t pps_gmtimer_interrupt(int irq, void *data) {
       tmp64 = (u64) delta * time_diff + (count_diff >> 1);
       (void) do_div(tmp64, count_diff);
       pdata->delta.tv_nsec = tmp64;
+      pdata->method = METHOD_MEASURED_FREQ;
     } else {
       pdata->delta.tv_nsec = rounded_cyc2ns(delta, &pdata->clksrc);
+      pdata->method = METHOD_CONFIGURED_FREQ;
     }
     pdata->delta.tv_sec = 0;
 
